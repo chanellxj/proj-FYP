@@ -1,0 +1,111 @@
+# Extract formant values --------------------------------------------------
+
+install.packages("rPraat")
+install.packages("dplyr")
+library(rPraat)
+library(dplyr)
+
+#f <- formant.read("AC.Formant", encoding = "UTF-8")
+#Creating an empty list
+tgList <- list("listTg", "listFormant") 
+#the list will extract files in the folder with the format .textgrid, .formant.
+listTg <- dir(pattern = "*.TextGrid")
+listFormant <- dir(pattern = "*.Formant")
+
+F1list <- vector(mode = "list", length = length(listTg))
+F2list <- vector(mode = "list", length = length(listTg))
+
+numTimeSamples <- 100
+#where your looped interp will be stored for every file
+masterF1Data <- matrix(numeric(numTimeSamples), nrow=1, ncol=numTimeSamples)*NA
+masterF2Data <- matrix(numeric(numTimeSamples), nrow=1, ncol=numTimeSamples)*NA
+
+
+fileID <- ""
+segID <- ""
+count <- 1
+
+for (tgIdx in 1:length(listTg)) { #For every textgrid file in tgList...
+  tgList[[tgIdx]] <- tg.read(listTg[tgIdx], encoding = "auto") #extract
+  formantTemp <- formant.toArray(formant.read(listFormant[tgIdx]))
+  
+  #Sanity checking plots: only max 2 formants set in formant analysis???
+  #plot(formantTemp$t, formantTemp$frequencyArray[1, ]) #F1 - but with formant id errors (often F2)
+  #plot(formantTemp$t, formantTemp$frequencyArray[2, ]) #F2 - somewhat high?
+  
+  #Extract every interval and interpolate to same number of samples
+  segData <- tgList[[tgIdx]]$phoneme
+  phoneme <- c("æ", "a:")
+  vowelIndices <- which(segData$label %in% phoneme)
+  
+  N <- length(vowelIndices)
+  interpF1 <- matrix(numeric(N*numTimeSamples), nrow=N, ncol=numTimeSamples)*NA 
+  interpF2 <- matrix(numeric(N*numTimeSamples), nrow=N, ncol=numTimeSamples)*NA 
+  
+  #SRM: Be sure to only use the vowel indices
+  segCount <- 1
+  for (sIdx in vowelIndices) {
+    
+    #Find closest sample in formant data to segment boundary
+    startTime <- segData$t1[sIdx]
+    stopTime <- segData$t2[sIdx]
+    
+    startSamp <- which.min(abs(formantTemp$t - startTime)) #abs = to print absolute value
+    stopSamp <- which.min(abs(formantTemp$t - stopTime))
+    
+    f1Orig <- formantTemp$frequencyArray[1, startSamp:stopSamp]
+    f2Orig <- formantTemp$frequencyArray[2, startSamp:stopSamp]
+    #Only interpolate if we have enough non-NA data
+    numF1Samples <- sum(!is.na(f1Orig))
+    numF2Samples <- sum(!is.na(f2Orig))
+    
+    cat(paste0("\nWorking on segment #", sIdx, " (= ", segData$label[sIdx], ", f1Samples = ", numF1Samples, ", f2Samples = ",  numF2Samples, ") in file ", tgIdx, " of ", length(listTg)))
+    
+    if (numF1Samples > 2 && numF2Samples > 2) {
+      timeOrig <- formantTemp$t[startSamp:stopSamp]
+      timeInterp <- seq(formantTemp$t[startSamp], formantTemp$t[stopSamp], length.out=numTimeSamples)
+      
+      
+      #Do the linear interpolation
+      interpF1[segCount,] <- approx(timeOrig, f1Orig, timeInterp)$y
+      interpF2[segCount,] <- approx(timeOrig, f2Orig, timeInterp)$y
+      
+      segCount <- segCount + 1
+      #Sanity check interpolation
+      #
+      #plot(timeOrig, formantTemp$frequencyArray[1, startSamp:stopSamp])
+      #lines(timeInterp, interpF1[segCount,], col="red") #no f1Interp found
+    }
+    
+    #Store the metadata (fileName, segment ID)
+    fileID[count] <- gsub(".Formant", "", listFormant[tgIdx])
+    segID[count] <- segData$label[sIdx]
+    
+    count <- count + 1
+  }
+  
+  #Store each file's formants
+  F1list[[tgIdx]] <- data.frame(interpF1)
+  F2list[[tgIdx]] <- data.frame(interpF2)
+  
+  #Concatenate the matrices
+  masterF1Data <- rbind(masterF1Data, interpF1)
+  masterF2Data <- rbind(masterF2Data, interpF2)
+  
+}
+
+
+#Drop first rows (NAs) used for initializing the data matrices
+masterF1Data <- masterF1Data[-1, ]
+masterF2Data <- masterF2Data[-1, ]
+
+dfAcoustic <- data.frame(fileID, segID, masterF1Data, masterF2Data)
+colnames(dfAcoustic)[3:(numTimeSamples+2)] <- paste0("F1_t", 1:numTimeSamples)
+colnames(dfAcoustic)[(numTimeSamples+3):ncol(dfAcoustic)] <- paste0("F2_t", 1:numTimeSamples)
+dfAcoustic$uniqueID <- factor(1:nrow(dfAcoustic)) #why is fileID "" 
+
+library(reshape2)
+dfAcousticMelt <- melt(dfAcoustic, id.vars=c("fileID", "segID", "uniqueID"))
+
+dfAcousticMelt$time <- as.numeric(regmatches(dfAcousticMelt$variable, regexpr("[0-9]*$", dfAcousticMelt$variable)))
+dfAcousticMelt$formant <- as.factor(regmatches(dfAcousticMelt$variable, regexpr("F[1-2]", dfAcousticMelt$variable)))
